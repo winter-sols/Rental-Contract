@@ -57,6 +57,9 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
     /// @dev service fee percentage
     uint256 serviceFeeRatio;
 
+    /// @dev service fee percentage
+    uint256 serviceFee;
+
     event Registered(address owner, address nftAddr, uint256 tokenId);
 
     event RentRequested(address renter, address owner, uint256 tokenId, Wrap data);
@@ -65,6 +68,31 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
 
     event RentDenied(address renter, address owner, uint256 tokenId, Wrap data);
 
+    event Unregistered(address owner, address nftAddr, uint256 tokenId);
+
+    event ServiceFeeRatioSet(uint256 percentage);
+
+    event ViolationRaised(address owner, address renter, uint256 tokenId);
+
+    event DisputeResolved(
+        Violation judgement,
+        address owner,
+        address renter,
+        address serviceFeeCollector,
+        uint256 toOwner,
+        uint256 toRenter,
+        uint256 serviceFees,
+        uint256 ownerPenalty
+    );
+
+    // event RenterViolated(address renter, address owner, uint256 tokenId);
+
+    // event OwnerSeriouslyViolated(address renter, address owner, uint256 tokenId, uint256 originTokenId);
+
+    // event OwnerViolated(address renter, address owner, uint256 tokenId);
+
+    event OwnerPenaltyPaid(address serviceFeeCollector, address renter, uint256 penalty);
+    
     /**
      * @dev constructor
      */
@@ -82,6 +110,7 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
 
     modifier onlyLoyalOwner(address owner) {
         require(ownerPenalties[owner] == 0, "wNFT: owner has penalties");
+        _;
     }
 
     /**
@@ -139,15 +168,15 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
     function unregister(uint256 tokenId) external onlyValidToken(tokenId) {
         Wrap storage wrap = wraps[tokenId];
 
-        require(tokenStatus(tokenId) == WrapStatus.Free, "wNFT: cannot unregister non free wrap");
+        require(tokenStatus(tokenId) == WrapStatus.FREE, "wNFT: cannot unregister non free wrap");
         require(wrap.owner == msg.sender, "wNFT: only token owner can unregister");
 
         _burn(tokenId);
         tokenId = wrap.tokenId;
-        delete wrap;
+        delete wraps[tokenId];
         wrap.nftAddr.safeTransferFrom(address(this), msg.sender, tokenId);
 
-        emit Unregistered(msg.sender, wrap.nftAddr, tokenId);
+        emit Unregistered(msg.sender, address(wrap.nftAddr), tokenId);
     }
 
     /**
@@ -195,7 +224,7 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
         wrap.rentalPeriod = rentalPeriod;
         wrap.renter = msg.sender;
 
-        emit RentRequested(msg.sender, owner, tokenId, wrap);
+        emit RentRequested(msg.sender, wrap.owner, tokenId, wrap);
     }
 
     /**
@@ -216,7 +245,7 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
         } else {
             // refund the upfront if the request is not approved
             payable(wrap.renter).call{value: wrap.rentalPeriod * wrap.dailyRate}("");
-            delete wrap.renter;
+            wrap.renter = address(0);
             emit RentDenied(wrap.renter, msg.sender, tokenId, wrap);
         }
     }
@@ -262,24 +291,24 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
         Wrap storage wrap = wraps[tokenId];
         address renter = wrap.renter;
         address owner = wrap.owner;
-        address serviceFeeCollector = owner();
+        address serviceFeeCollector = address(this);
         uint256 rentalFee = wrap.rentalPeriod * wrap.dailyRate;
 
-        _endRent();
+        _endRent(tokenId);
 
         if (wrap.disputeBy == wrap.renter) {
             if (judgement == Violation.OWNER_VIOLATION || judgement == Violation.OWNER_SERIOUS_VIOLATION) {
                 uint256 ownerPenalty = rentalFee * ownerPenaltyRatio / 100;
                 uint256 decidedRentalFee = rentalFee * decisionPaymentRatio / 100;
                 uint256 toOwner = excludeServiceFeeFrom(decidedRentalFee);
-                uint256 serviceFee = decidedRentalFee - toOwner;
+                uint256 serviceFees = decidedRentalFee - toOwner;
                 uint256 toRenter = rentalFee - decidedRentalFee;
 
                 ownerPenalties[owner] += ownerPenalty;
 
                 payable(owner).call{value: toOwner}("");
                 payable(renter).call{value: toRenter}("");
-                payable(serviceFeeCollector).call{value: serviceFee}("");
+                payable(serviceFeeCollector).call{value: serviceFees}("");
 
                 emit DisputeResolved(
                     judgement,
@@ -288,15 +317,17 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
                     serviceFeeCollector,
                     toOwner,
                     toRenter,
-                    serviceFee,
+                    serviceFees,
                     ownerPenalty
                 );
             } else if (judgement == Violation.NO_VIOLATION) {
                 uint256 toOwner = excludeServiceFeeFrom(rentalFee);
-                uint256 serviceFee = rentalFee - toOwner;
+                uint256 decidedRentalFee = rentalFee * decisionPaymentRatio / 100;
+                uint256 toRenter = rentalFee - decidedRentalFee;
+                uint256 serviceFees = rentalFee - toOwner;
 
                 payable(wrap.owner).call{value: toOwner}("");
-                payable(serviceFeeCollector).call{value: serviceFee}("");
+                payable(serviceFeeCollector).call{value: serviceFees}("");
 
                 emit DisputeResolved(
                     judgement,
@@ -305,7 +336,7 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
                     serviceFeeCollector,
                     toOwner,
                     toRenter,
-                    serviceFee,
+                    serviceFees,
                     0
                 );
             } else {
@@ -315,61 +346,83 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
             if (judgement == Violation.RENTER_VIOLATION) {
 
             } else if (judgement == Violation.NO_VIOLATION) {
+                uint256 toOwner = excludeServiceFeeFrom(rentalFee);
+                uint256 decidedRentalFee = rentalFee * decisionPaymentRatio / 100;
+                uint256 toRenter = rentalFee - decidedRentalFee;
+                uint256 serviceFees = rentalFee - toOwner;
 
+                payable(wrap.owner).call{value: toOwner}("");
+                payable(serviceFeeCollector).call{value: serviceFees}("");
+
+                emit DisputeResolved(
+                    judgement,
+                    wrap.owner,
+                    wrap.renter,
+                    serviceFeeCollector,
+                    toOwner,
+                    toRenter,
+                    serviceFees,
+                    0
+                );
             } else {
                 revert('wNFT: invalid judgement');
             }
         }
-        if (judgement == Violation.RENTER_VIOLATION) {
-            delete wrap.renter;
 
-            uint256 securityDeposit = rentalFee * wrap.securityDepositRatio / 100;
-            _transfer(renter, address(this), tokenId);
+        // if (judgement == Violation.RENTER_VIOLATION) {
+        //     wrap.renter = address(0);
 
-            payable(renter).call{value: rentalFee - securityDeposit}("");
-            payable(owner).call{value: excludeServiceFeeFrom(securityDeposit)}("");
+        //     uint256 securityDeposit = rentalFee * wrap.securityDepositRatio / 100;
+        //     _transfer(renter, address(this), tokenId);
 
-            emit RenterViolated(renter, owner, tokenId);
-        } else if (judgement == Violation.OWNER_VIOLATION) {
-            uint256 ownerPenalty = rentalFee * ownerPenaltyRatio / 100;
+        //     payable(renter).call{value: rentalFee - securityDeposit}("");
+        //     payable(owner).call{value: excludeServiceFeeFrom(securityDeposit)}("");
 
-            payable(renter).call{value: excludeServiceFeeFrom(ownerPenalty)}("");
-            // ask owner to pay penalty
-            if (judgement == Violation.OWNER_SERIOUS_VIOLATION) {
-                uint256 originTokenId = wrap.tokenId;
-                _burn(tokenId);
-                delete wrap;
-                wrap.nftAddr.safeTransferFrom(address(this), owner, wrap.tokenId);
-                emit OwnerSeriouslyViolated(renter, owner, tokenId, originTokenId);
-            } else {
-                delete wrap.renter;
-                _transfer(renter, address(this), tokenId);
-                emit OwnerViolated(renter, owner, tokenId);
-            }
-        }
+        //     emit RenterViolated(renter, owner, tokenId);
+        // } else if (judgement == Violation.OWNER_VIOLATION) {
+        //     uint256 ownerPenalty = rentalFee * ownerPenaltyRatio / 100;
+
+        //     payable(renter).call{value: excludeServiceFeeFrom(ownerPenalty)}("");
+        //     // ask owner to pay penalty
+        //     if (judgement == Violation.OWNER_SERIOUS_VIOLATION) {
+        //         uint256 originTokenId = wrap.tokenId;
+        //         _burn(tokenId);
+        //         delete wraps[tokenId];
+        //         wrap.nftAddr.safeTransferFrom(address(this), owner, wrap.tokenId);
+        //         emit OwnerSeriouslyViolated(renter, owner, tokenId, originTokenId);
+        //     } else {
+        //         wrap.renter = address(0);
+        //         _transfer(renter, address(this), tokenId);
+        //         emit OwnerViolated(renter, owner, tokenId);
+        //     }
+        // }
     }
 
-    function excludeServiceFeeFrom(uint256 amount) pure public returns (uint256) {
+    function excludeServiceFeeFrom(uint256 amount) public view returns (uint256) {
         return amount - amount * serviceFeeRatio / 100;
     }
 
     function _endRent(uint256 tokenId) internal {
         Wrap storage wrap = wraps[tokenId];
         _transfer(wrap.renter, address(this), tokenId);
-        delete wrap.renter;
+        wrap.renter = address(0);
     }
 
-    function payPenalty() external payable {
+    function payPenalty() external onlyOwner payable {
         uint256 penalty = ownerPenalties[msg.sender];
+        address serviceFeeCollector = owner();
+
         require(msg.value == penalty, "wNFT: incorrect amount");
         ownerPenalties[msg.sender] = 0;
+
+
         serviceFeeCollector.call{value: penalty}("");
 
         emit OwnerPenaltyPaid(address(serviceFeeCollector), msg.sender, penalty);
     }
 
     function tokenURI(uint256 tokenId)
-        external
+        public
         view
         override
         onlyValidToken(tokenId)
