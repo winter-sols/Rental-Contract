@@ -27,7 +27,15 @@ const MNEMONIC = process.env.MNEMONIC || 'sample-mnemonic'
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY || 'etherscan-api-key'
 
 module.exports = {
-  solidity: "0.8.4",
+  solidity: {
+    version: "0.8.4",
+    settings: {
+      optimizer: {
+        enabled: true,
+        runs: 1,
+      }
+    }
+  },
   namedAccounts: {
     deployer: 0,
   },
