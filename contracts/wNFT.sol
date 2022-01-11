@@ -39,7 +39,7 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
     /// @dev owner address => amount
     mapping(address => uint256) ownerBalance;
 
-    /// @dev service address => amount
+    /// @dev service fee balance
     uint256 serviceFeeBalance;
 
     /// @dev service fee percentage
@@ -69,9 +69,9 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
 
     event ServiceFeeRatioSet(uint256 percentage);
 
-    event OwnerBalanceWithdraw(address owner, uint256 amount);
+    event OwnerBalanceWithdrawn(address owner, uint256 amount);
 
-    event ServiceFeeBalanceWithdraw(address recipient, uint256 amount);
+    event ServiceFeeBalanceWithdrawn(address recipient, uint256 amount);
 
     /**
      * @dev constructor
@@ -280,11 +280,10 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
 
         Wrap storage wrap = wraps[tokenId];
         address renter = wrap.renter;
-        address owner = wrap.owner;
         uint256 rentalFee = wrap.rentalPeriod * wrap.dailyRate;
 
-        ERC721._transfer(wrap.renter, address(this), tokenId);
         wrap.renter = address(0);
+        ERC721._transfer(renter, address(this), tokenId);
 
         uint256 serviceFees = (rentalFee * serviceFeeRatio) / 100;
         uint256 netRentalFeeToOwner = rentalFee - serviceFees;
@@ -292,7 +291,7 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
         ownerBalance[wrap.owner] += netRentalFeeToOwner;
         serviceFeeBalance += serviceFees;
 
-        emit RentEnded(renter, owner, tokenId, wrap);
+        emit RentEnded(renter, wrap.owner, tokenId, wrap);
     }
 
     function tokenURI(uint256 tokenId)
@@ -316,12 +315,12 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
 
     function withdrawOwnerBalance(address owner) external nonReentrant {
         uint256 amount = ownerBalance[owner];
-        ownerBalance[owner] = 0;
         if (amount > 0) {
+            ownerBalance[owner] = 0;
             (bool success, ) = payable(owner).call{value: amount}("");
             require(success);
 
-            emit OwnerBalanceWithdraw(owner, amount);
+            emit OwnerBalanceWithdrawn(owner, amount);
         }
     }
 
@@ -331,12 +330,12 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
         nonReentrant
     {
         uint256 amount = serviceFeeBalance;
-        serviceFeeBalance = 0;
         if (amount > 0) {
+            serviceFeeBalance = 0;
             (bool success, ) = payable(recipient).call{value: amount}("");
             require(success);
 
-            emit ServiceFeeBalanceWithdraw(recipient, amount);
+            emit ServiceFeeBalanceWithdrawn(recipient, amount);
         }
     }
 }
