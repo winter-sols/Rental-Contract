@@ -40,7 +40,7 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
     mapping(address => uint256) ownerBalance;
 
     /// @dev service address => amount
-    mapping(address => uint256) serviceFeeBalance;
+    uint256 serviceFeeBalance;
 
     /// @dev service fee percentage
     uint256 public serviceFeeRatio;
@@ -61,18 +61,17 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
         Wrap data
     );
 
-    event RentEnded(
-        address renter,
-        address owner,
-        uint256 tokenId,
-        Wrap data
-    );
+    event RentEnded(address renter, address owner, uint256 tokenId, Wrap data);
 
     event RentDenied(address renter, address owner, uint256 tokenId, Wrap data);
 
     event Unregistered(address owner, address nftAddr, uint256 tokenId);
 
     event ServiceFeeRatioSet(uint256 percentage);
+
+    event OwnerBalanceWithdraw(address owner, uint256 amount);
+
+    event ServiceFeeBalanceWithdraw(address recipient, uint256 amount);
 
     /**
      * @dev constructor
@@ -242,16 +241,14 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
 
         if (approve) {
             wrap.rentStarted = block.timestamp;
-            __transfer(address(this), wrap.renter, tokenId);
+            ERC721._transfer(address(this), wrap.renter, tokenId);
             emit RentStarted(wrap.renter, msg.sender, tokenId, wrap);
         } else {
             // refund the upfront if the request is not approved
-            address temp = wrap.renter;
+            address renter = wrap.renter;
             wrap.renter = address(0);
-            
-            payable(temp).call{
-                value: wrap.rentalPeriod * wrap.dailyRate
-            }("");
+
+            payable(renter).call{value: wrap.rentalPeriod * wrap.dailyRate}("");
             emit RentDenied(wrap.renter, msg.sender, tokenId, wrap);
         }
     }
@@ -271,38 +268,31 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
      * @dev Complete rent
      * @param tokenId wrap token id
      */
-    function completeRent(
-        uint256 tokenId
-    ) external onlyValidToken(tokenId) nonReentrant {
+    function completeRent(uint256 tokenId)
+        external
+        onlyValidToken(tokenId)
+        nonReentrant
+    {
         require(
             tokenStatus(tokenId) == WrapStatus.RENTED,
             "wNFT: only violated token"
         );
-        
+
         Wrap storage wrap = wraps[tokenId];
         address renter = wrap.renter;
         address owner = wrap.owner;
-        address serviceFeeCollector = address(this);
         uint256 rentalFee = wrap.rentalPeriod * wrap.dailyRate;
 
-        __transfer(wrap.renter, address(this), tokenId);
+        ERC721._transfer(wrap.renter, address(this), tokenId);
         wrap.renter = address(0);
 
-        uint256 serviceFees = serviceFeeFrom(rentalFee);
-        uint256 toOwner = rentalFee - serviceFees;
+        uint256 serviceFees = (rentalFee * serviceFeeRatio) / 100;
+        uint256 netRentalFeeToOwner = rentalFee - serviceFees;
 
-        ownerBalance[wrap.owner] += toOwner;
-        serviceFeeBalance[serviceFeeCollector] += serviceFees;
-        
+        ownerBalance[wrap.owner] += netRentalFeeToOwner;
+        serviceFeeBalance += serviceFees;
+
         emit RentEnded(renter, owner, tokenId, wrap);
-    }
-
-    function serviceFeeFrom(uint256 amount)
-        public
-        view
-        returns (uint256)
-    {
-        return (amount * serviceFeeRatio) / 100;
     }
 
     function tokenURI(uint256 tokenId)
@@ -317,32 +307,36 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
     }
 
     function _transfer(
-        address from,
-        address to,
-        uint256 tokenId
-    ) internal override {
-        revert("can't transfer");
+        address,
+        address,
+        uint256
+    ) internal pure override {
+        revert("wNFT: can't transfer");
     }
 
-    function __transfer(
-        address from,
-        address to,
-        uint256 tokenId
-    ) internal {
-        ERC721._transfer(from, to, tokenId);
-    }
-
-    function withdrawOwnerBalance(address owner) external {
-        uint amount = ownerBalance[owner];
+    function withdrawOwnerBalance(address owner) external nonReentrant {
+        uint256 amount = ownerBalance[owner];
         ownerBalance[owner] = 0;
-        (bool success, ) = payable(owner).call{value: amount}("");
-        require(success);
+        if (amount > 0) {
+            (bool success, ) = payable(owner).call{value: amount}("");
+            require(success);
+
+            emit OwnerBalanceWithdraw(owner, amount);
+        }
     }
 
-    function withdrawServiceBalance(address service) external {
-        uint amount = serviceFeeBalance[service];
-        serviceFeeBalance[service] = 0;
-        (bool success, ) = payable(service).call{value: amount}("");
-        require(success);
+    function withdrawServiceFeeBalance(address recipient)
+        external
+        onlyOwner
+        nonReentrant
+    {
+        uint256 amount = serviceFeeBalance;
+        serviceFeeBalance = 0;
+        if (amount > 0) {
+            (bool success, ) = payable(recipient).call{value: amount}("");
+            require(success);
+
+            emit ServiceFeeBalanceWithdraw(recipient, amount);
+        }
     }
 }
