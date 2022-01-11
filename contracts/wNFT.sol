@@ -26,7 +26,6 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
         uint256 rentalPeriod;
         /// @dev rent start timestamp
         uint256 rentStarted;
-        uint256 securityDepositRatio;
         uint256 dailyRate;
         uint256 tokenId;
     }
@@ -38,16 +37,13 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
     mapping(uint256 => Wrap) internal wraps;
 
     /// @dev owner address => amount
-    mapping(address => uint256) payableOwner;
+    mapping(address => uint256) ownerBalance;
 
     /// @dev service address => amount
-    mapping(address => uint256) payableService;
+    mapping(address => uint256) serviceFeeBalance;
 
     /// @dev service fee percentage
-    uint256 serviceFeeRatio;
-
-    /// @dev service fee percentage
-    uint256 serviceFee;
+    uint256 public serviceFeeRatio;
 
     event Registered(address owner, address nftAddr, uint256 tokenId);
 
@@ -81,13 +77,13 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
     /**
      * @dev constructor
      */
-    constructor(uint256 _serviceFee)
+    constructor(uint256 _serviceFeeRatio)
         ERC721("wNFT", "wNFT")
         Ownable()
         ReentrancyGuard()
     {
-        require(_serviceFee < 100, "wNFT: invalid service fee");
-        serviceFee = _serviceFee;
+        require(_serviceFeeRatio < 100, "wNFT: invalid service fee");
+        serviceFeeRatio = _serviceFeeRatio;
     }
 
     modifier onlyValidToken(uint256 tokenId) {
@@ -108,8 +104,7 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
         uint256 tokenId,
         uint256 minRentalPeriod,
         uint256 maxRentalPeriod,
-        uint256 dailyRate,
-        uint256 securityDepositRatio
+        uint256 dailyRate
     ) external payable {
         address owner = IERC721URI(nftAddr).ownerOf(tokenId);
 
@@ -124,10 +119,6 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
             "wNFT: invalid max rental period"
         );
         require(dailyRate > 0, "wNFT: zero daily rate");
-        require(
-            securityDepositRatio < 100,
-            "wNFT: invalid security deposit ratio"
-        );
 
         uint256 newTokenId = tokenIdTracker;
         Wrap storage wrap = wraps[newTokenId];
@@ -141,7 +132,6 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
         wrap.minRentalPeriod = minRentalPeriod;
         wrap.maxRentalPeriod = maxRentalPeriod;
         wrap.dailyRate = dailyRate;
-        wrap.securityDepositRatio = securityDepositRatio;
 
         // escrow the nft
         wrap.nftAddr.safeTransferFrom(owner, address(this), tokenId);
@@ -252,14 +242,16 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
 
         if (approve) {
             wrap.rentStarted = block.timestamp;
-            _transfer(address(this), wrap.renter, tokenId);
+            __transfer(address(this), wrap.renter, tokenId);
             emit RentStarted(wrap.renter, msg.sender, tokenId, wrap);
         } else {
             // refund the upfront if the request is not approved
-            payable(wrap.renter).call{
+            address temp = wrap.renter;
+            wrap.renter = address(0);
+            
+            payable(temp).call{
                 value: wrap.rentalPeriod * wrap.dailyRate
             }("");
-            wrap.renter = address(0);
             emit RentDenied(wrap.renter, msg.sender, tokenId, wrap);
         }
     }
@@ -281,7 +273,7 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
      */
     function completeRent(
         uint256 tokenId
-    ) external onlyOwner onlyValidToken(tokenId) nonReentrant {
+    ) external onlyValidToken(tokenId) nonReentrant {
         require(
             tokenStatus(tokenId) == WrapStatus.RENTED,
             "wNFT: only violated token"
@@ -293,29 +285,24 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
         address serviceFeeCollector = address(this);
         uint256 rentalFee = wrap.rentalPeriod * wrap.dailyRate;
 
-        _endRent(tokenId);
+        __transfer(wrap.renter, address(this), tokenId);
+        wrap.renter = address(0);
 
-        uint256 toOwner = excludeServiceFeeFrom(rentalFee);
-        uint256 serviceFees = rentalFee - toOwner;
+        uint256 serviceFees = serviceFeeFrom(rentalFee);
+        uint256 toOwner = rentalFee - serviceFees;
 
-        payableOwner[wrap.owner] += toOwner;
-        payableService[serviceFeeCollector] += serviceFees;
+        ownerBalance[wrap.owner] += toOwner;
+        serviceFeeBalance[serviceFeeCollector] += serviceFees;
         
         emit RentEnded(renter, owner, tokenId, wrap);
     }
 
-    function excludeServiceFeeFrom(uint256 amount)
+    function serviceFeeFrom(uint256 amount)
         public
         view
         returns (uint256)
     {
-        return amount - (amount * serviceFeeRatio) / 100;
-    }
-
-    function _endRent(uint256 tokenId) internal {
-        Wrap storage wrap = wraps[tokenId];
-        _transfer(wrap.renter, address(this), tokenId);
-        wrap.renter = address(0);
+        return (amount * serviceFeeRatio) / 100;
     }
 
     function tokenURI(uint256 tokenId)
@@ -334,33 +321,28 @@ contract wNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
         address to,
         uint256 tokenId
     ) internal override {
-        WrapStatus status = tokenStatus(tokenId);
+        revert("can't transfer");
+    }
 
-        Wrap storage wrap = wraps[tokenId];
-        string memory err = "wNFT: invalid transfer";
-
-        if (status == WrapStatus.REQUEST_PENDING) {
-            require(from == address(this), err);
-            require(to == wrap.renter, err);
-        } else if (status == WrapStatus.FREE) {
-            require(from == wrap.renter, err);
-            require(to == address(this), err);
-        }
-
+    function __transfer(
+        address from,
+        address to,
+        uint256 tokenId
+    ) internal {
         ERC721._transfer(from, to, tokenId);
     }
 
-    function withdrawOwner(address owner) external {
-        uint refund = payableOwner[owner];
-        payableOwner[owner] = 0;
-        (bool success, ) = payable(owner).call{value: refund}("");
+    function withdrawOwnerBalance(address owner) external {
+        uint amount = ownerBalance[owner];
+        ownerBalance[owner] = 0;
+        (bool success, ) = payable(owner).call{value: amount}("");
         require(success);
     }
 
-    function withdrawService(address service) external {
-        uint refund = payableService[service];
-        payableService[service] = 0;
-        (bool success, ) = payable(service).call{value: refund}("");
+    function withdrawServiceBalance(address service) external {
+        uint amount = serviceFeeBalance[service];
+        serviceFeeBalance[service] = 0;
+        (bool success, ) = payable(service).call{value: amount}("");
         require(success);
     }
 }
